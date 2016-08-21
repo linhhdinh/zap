@@ -24,6 +24,9 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"runtime"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -90,6 +93,11 @@ func Int(key string, val int) Field {
 	return Field{key: key, fieldType: intType, ival: int64(val)}
 }
 
+// Int32 constructs a Field with the given key and value. Marshaling ints is lazy.
+func Int32(key string, val int32) Field {
+	return Field{key: key, fieldType: intType, ival: int64(val)}
+}
+
 // Int64 constructs a Field with the given key and value. Like ints, int64s are
 // marshaled lazily.
 func Int64(key string, val int64) Field {
@@ -98,6 +106,11 @@ func Int64(key string, val int64) Field {
 
 // Uint constructs a Field with the given key and value.
 func Uint(key string, val uint) Field {
+	return Field{key: key, fieldType: uintType, ival: int64(val)}
+}
+
+// Uint16 constructs a Field with the given key and value.
+func Uint16(key string, val uint16) Field {
 	return Field{key: key, fieldType: uintType, ival: int64(val)}
 }
 
@@ -149,6 +162,20 @@ func Stack() Field {
 	field := String("stacktrace", takeStacktrace(bs, false))
 	enc.Free()
 	return field
+}
+
+// Sourced adds a source field to the logger that contains
+// the file name and line where the logging happened.
+func Sourced() Field {
+	_, file, line, ok := runtime.Caller(2)
+	if !ok {
+		file = "<???>"
+		line = 1
+	} else {
+		slash := strings.LastIndex(file, "/")
+		file = file[slash+1:]
+	}
+	return Field{key: "source", fieldType: stringType, str: file + ":" + strconv.Itoa(line)}
 }
 
 // Duration constructs a Field with the given key and value. It represents
