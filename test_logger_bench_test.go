@@ -18,24 +18,51 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package zap
+package zap_test
 
-import "time"
+import (
+	"testing"
 
-// An Entry represents a complete log message. The entry's structured context
-// is already serialized, but the log level, time, and message are available
-// for inspection and modification.
-//
-// Entries are pooled, so any functions that accept them must be careful not to
-// retain references to them.
-type Entry struct {
-	Level   Level
-	Time    time.Time
-	Message string
-	enc     Encoder
+	"github.com/uber-go/zap"
+)
+
+func withBenchedTee(b *testing.B, f func(zap.Logger)) {
+	logger := zap.Tee(
+		zap.New(
+			zap.NewJSONEncoder(),
+			zap.DebugLevel,
+			zap.DiscardOutput,
+		),
+		zap.New(
+			zap.NewJSONEncoder(),
+			zap.InfoLevel,
+			zap.DiscardOutput,
+		),
+	)
+	b.ResetTimer()
+	f(logger)
 }
 
-// Fields returns a mutable reference to the entry's accumulated context.
-func (e Entry) Fields() KeyValue {
-	return e.enc
+func BenchmarkTee_Check(b *testing.B) {
+	cases := []struct {
+		lvl zap.Level
+		msg string
+	}{
+		{zap.DebugLevel, "foo"},
+		{zap.InfoLevel, "bar"},
+		{zap.WarnLevel, "baz"},
+		{zap.ErrorLevel, "babble"},
+	}
+	withBenchedTee(b, func(logger zap.Logger) {
+		b.RunParallel(func(pb *testing.PB) {
+			i := 0
+			for pb.Next() {
+				tt := cases[i]
+				if cm := logger.Check(tt.lvl, tt.msg); cm.OK() {
+					cm.Write(zap.Int("i", i))
+				}
+				i = (i + 1) % len(cases)
+			}
+		})
+	})
 }
