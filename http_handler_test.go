@@ -30,16 +30,16 @@ import (
 	"strings"
 	"testing"
 
-	. "github.com/uber-go/zap"
-	"github.com/uber-go/zap/spy"
+	. "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func newHandler() (AtomicLevel, Logger) {
-	lvl := DynamicLevel()
-	logger, _ := spy.New(lvl)
+func newHandler() (AtomicLevel, *Logger) {
+	lvl := NewAtomicLevel()
+	logger := New(zapcore.NewNopCore())
 	return lvl, logger
 }
 
@@ -55,7 +55,7 @@ func assertCodeMethodNotAllowed(t testing.TB, code int) {
 	assert.Equal(t, http.StatusMethodNotAllowed, code, "Unexpected response status code.")
 }
 
-func assertResponse(t testing.TB, expectedLevel Level, actualBody string) {
+func assertResponse(t testing.TB, expectedLevel zapcore.Level, actualBody string) {
 	assert.Equal(t, fmt.Sprintf(`{"level":"%s"}`, expectedLevel)+"\n", actualBody, "Unexpected response body.")
 }
 

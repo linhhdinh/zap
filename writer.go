@@ -21,145 +21,58 @@
 package zap
 
 import (
-	"bytes"
-	"io"
 	"io/ioutil"
-	"sync"
+	"os"
+
+	"go.uber.org/zap/internal/multierror"
+	"go.uber.org/zap/zapcore"
 )
 
-var (
-	// Discard is a convenience wrapper around ioutil.Discard.
-	Discard = AddSync(ioutil.Discard)
-	// DiscardOutput is an Option that discards logger output.
-	DiscardOutput = Output(Discard)
-)
-
-// A WriteFlusher is an io.Writer that can also flush any buffered data.
-type WriteFlusher interface {
-	io.Writer
-	Flush() error
-}
-
-// A WriteSyncer is an io.Writer that can also flush any buffered data. Note
-// that *os.File (and thus, os.Stderr and os.Stdout) implement WriteSyncer.
-type WriteSyncer interface {
-	io.Writer
-	Sync() error
-}
-
-// AddSync converts an io.Writer to a WriteSyncer. It attempts to be
-// intelligent: if the concrete type of the io.Writer implements WriteSyncer or
-// WriteFlusher, we'll use the existing Sync or Flush methods. If it doesn't,
-// we'll add a no-op Sync method.
-func AddSync(w io.Writer) WriteSyncer {
-	switch w := w.(type) {
-	case WriteSyncer:
-		return w
-	case WriteFlusher:
-		return flusherWrapper{w}
-	default:
-		return writerWrapper{w}
+// Open is a high-level wrapper that takes a variadic number of paths, opens or
+// creates each of the specified files, and combines them into a locked
+// WriteSyncer. It also returns any error encountered and a function to close
+// any opened files.
+//
+// Passing no paths returns a no-op WriteSyncer. The special paths "stdout" and
+// "stderr" are interpreted as os.Stdout and os.Stderr, respectively.
+func Open(paths ...string) (zapcore.WriteSyncer, func(), error) {
+	if len(paths) == 0 {
+		return zapcore.AddSync(ioutil.Discard), func() {}, nil
 	}
+
+	writers, close, err := open(paths)
+	if len(writers) == 1 {
+		return zapcore.Lock(writers[0]), close, err
+	}
+	return zapcore.Lock(zapcore.NewMultiWriteSyncer(writers...)), close, err
 }
 
-type lockedWriteSyncer struct {
-	sync.Mutex
-	ws WriteSyncer
-}
-
-func newLockedWriteSyncer(ws WriteSyncer) WriteSyncer {
-	return &lockedWriteSyncer{ws: ws}
-}
-
-func (s *lockedWriteSyncer) Write(bs []byte) (int, error) {
-	s.Lock()
-	n, err := s.ws.Write(bs)
-	s.Unlock()
-	return n, err
-}
-
-func (s *lockedWriteSyncer) Sync() error {
-	s.Lock()
-	err := s.ws.Sync()
-	s.Unlock()
-	return err
-}
-
-type writerWrapper struct {
-	io.Writer
-}
-
-func (w writerWrapper) Sync() error {
-	return nil
-}
-
-type flusherWrapper struct {
-	WriteFlusher
-}
-
-func (f flusherWrapper) Sync() error {
-	return f.Flush()
-}
-
-// MultiWriteSyncer creates a WriteSyncer that duplicates its writes
-// and sync calls, similarly to to io.MultiWriter.
-func MultiWriteSyncer(ws ...WriteSyncer) WriteSyncer {
-	// Copy to protect against https://github.com/golang/go/issues/7809
-	return multiWriteSyncer(append([]WriteSyncer(nil), ws...))
-}
-
-// See https://golang.org/src/io/multi.go
-// When not all underlying syncers write the same number of bytes,
-// the smallest number is returned even though Write() is called on
-// all of them.
-func (ws multiWriteSyncer) Write(p []byte) (int, error) {
-	var errs multiError
-	nWritten := 0
-	for _, w := range ws {
-		n, err := w.Write(p)
-		if err != nil {
-			errs = append(errs, err)
+func open(paths []string) ([]zapcore.WriteSyncer, func(), error) {
+	var errs multierror.Error
+	writers := make([]zapcore.WriteSyncer, 0, len(paths))
+	files := make([]*os.File, 0, len(paths))
+	for _, path := range paths {
+		switch path {
+		case "stdout":
+			writers = append(writers, os.Stdout)
+			// Don't close standard out.
+			continue
+		case "stderr":
+			writers = append(writers, os.Stderr)
+			// Don't close standard error.
+			continue
 		}
-		if nWritten == 0 && n != 0 {
-			nWritten = n
-		} else if n < nWritten {
-			nWritten = n
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		errs = errs.Append(err)
+		if err == nil {
+			writers = append(writers, f)
+			files = append(files, f)
 		}
 	}
-	return nWritten, errs.asError()
-}
-
-func (ws multiWriteSyncer) Sync() error {
-	return wrapMultiError(ws...)
-}
-
-// Run a series of `f`s, collecting and aggregating errors if presents
-func wrapMultiError(fs ...WriteSyncer) error {
-	var errs multiError
-	for _, f := range fs {
-		if err := f.Sync(); err != nil {
-			errs = append(errs, err)
+	close := func() {
+		for _, f := range files {
+			f.Close()
 		}
 	}
-	return errs.asError()
+	return writers, close, errs.AsError()
 }
-
-type multiError []error
-
-func (m multiError) asError() error {
-	if len(m) > 0 {
-		return m
-	}
-	return nil
-}
-
-func (m multiError) Error() string {
-	sb := bytes.Buffer{}
-	for _, err := range m {
-		sb.WriteString(err.Error())
-		sb.WriteString(" ")
-	}
-	return sb.String()
-}
-
-type multiWriteSyncer []WriteSyncer

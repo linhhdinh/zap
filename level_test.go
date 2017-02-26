@@ -21,84 +21,86 @@
 package zap
 
 import (
+	"sync"
 	"testing"
+
+	"go.uber.org/zap/zapcore"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestLevelEnablerFunc(t *testing.T) {
-	opts := []Option{Fields(Int("foo", 42)), LevelEnablerFunc(func(l Level) bool { return l == DebugLevel })}
-	withJSONLogger(t, opts, func(log Logger, buf *testBuffer) {
-		log.Debug("@debug", Int("logger", 0))
-		log.Info("@info", Int("logger", 0))
-		assert.Equal(t, []string{
-			`{"level":"debug","msg":"@debug","foo":42,"logger":0}`,
-		}, buf.Lines())
-	})
-}
-
-func TestLevelString(t *testing.T) {
-	tests := map[Level]string{
-		DebugLevel:  "debug",
-		InfoLevel:   "info",
-		WarnLevel:   "warn",
-		ErrorLevel:  "error",
-		DPanicLevel: "dpanic",
-		PanicLevel:  "panic",
-		FatalLevel:  "fatal",
-		Level(-42):  "Level(-42)",
-	}
-
-	for lvl, stringLevel := range tests {
-		assert.Equal(t, stringLevel, lvl.String())
-	}
-}
-
-func TestLevelText(t *testing.T) {
+	enab := LevelEnablerFunc(func(l zapcore.Level) bool { return l == zapcore.InfoLevel })
 	tests := []struct {
-		text  string
-		level Level
+		level   zapcore.Level
+		enabled bool
 	}{
-		{"debug", DebugLevel},
-		{"info", InfoLevel},
-		{"warn", WarnLevel},
-		{"error", ErrorLevel},
-		{"dpanic", DPanicLevel},
-		{"panic", PanicLevel},
-		{"fatal", FatalLevel},
+		{DebugLevel, false},
+		{InfoLevel, true},
+		{WarnLevel, false},
+		{ErrorLevel, false},
+		{DPanicLevel, false},
+		{PanicLevel, false},
+		{FatalLevel, false},
 	}
 	for _, tt := range tests {
-		lvl := tt.level
-		marshaled, err := lvl.MarshalText()
-		assert.NoError(t, err, "Unexpected error marshaling level %v to text.", &lvl)
-		assert.Equal(t, tt.text, string(marshaled), "Marshaling level %v to text yielded unexpected result.", &lvl)
-
-		var unmarshaled Level
-		err = unmarshaled.UnmarshalText([]byte(tt.text))
-		assert.NoError(t, err, `Unexpected error unmarshaling text "%v" to level.`, tt.text)
-		assert.Equal(t, tt.level, unmarshaled, `Text "%v" unmarshaled to an unexpected level.`, tt.text)
+		assert.Equal(t, tt.enabled, enab.Enabled(tt.level), "Unexpected result applying LevelEnablerFunc to %s", tt.level)
 	}
 }
 
-func TestLevelNils(t *testing.T) {
-	var l *Level
-
-	// The String() method will not handle nil level properly.
-	assert.Panics(t, func() {
-		assert.Equal(t, "Level(nil)", l.String(), "Unexpected result stringifying nil *Level.")
-	}, "Level(nil).String() should panic")
-
-	_, err := l.MarshalText()
-	assert.Equal(t, errMarshalNilLevel, err, "Expected errMarshalNilLevel.")
-
-	assert.Panics(t, func() {
-		var l *Level
-		l.UnmarshalText([]byte("debug"))
-	}, "Expected to panic when unmarshaling into a null pointer.")
+func TestNewAtomicLevel(t *testing.T) {
+	lvl := NewAtomicLevel()
+	assert.Equal(t, InfoLevel, lvl.Level(), "Unexpected initial level.")
+	lvl.SetLevel(ErrorLevel)
+	assert.Equal(t, ErrorLevel, lvl.Level(), "Unexpected level after SetLevel.")
 }
 
-func TestLevelUnmarshalUnknownText(t *testing.T) {
-	var l Level
-	err := l.UnmarshalText([]byte("foo"))
-	assert.Contains(t, err.Error(), "unrecognized level", "Expected unmarshaling arbitrary text to fail.")
+func TestAtomicLevelMutation(t *testing.T) {
+	lvl := NewAtomicLevel()
+	lvl.SetLevel(WarnLevel)
+	// Trigger races for non-atomic level mutations.
+	proceed := make(chan struct{})
+	wg := &sync.WaitGroup{}
+	runConcurrently(10, 100, wg, func() {
+		<-proceed
+		assert.Equal(t, WarnLevel, lvl.Level())
+	})
+	runConcurrently(10, 100, wg, func() {
+		<-proceed
+		lvl.SetLevel(WarnLevel)
+	})
+	close(proceed)
+	wg.Wait()
+}
+
+func TestAtomicLevelUnmarshalText(t *testing.T) {
+	tests := []struct {
+		text   string
+		expect zapcore.Level
+		err    bool
+	}{
+		{"debug", DebugLevel, false},
+		{"info", InfoLevel, false},
+		{"", InfoLevel, false},
+		{"warn", WarnLevel, false},
+		{"error", ErrorLevel, false},
+		{"dpanic", DPanicLevel, false},
+		{"panic", PanicLevel, false},
+		{"fatal", FatalLevel, false},
+		{"foobar", InfoLevel, true},
+	}
+
+	for _, tt := range tests {
+		var lvl AtomicLevel
+		// Test both initial unmarshaling and overwriting existing value.
+		for i := 0; i < 2; i++ {
+			if tt.err {
+				assert.Error(t, lvl.UnmarshalText([]byte(tt.text)), "Expected unmarshaling %q to fail.", tt.text)
+			} else {
+				assert.NoError(t, lvl.UnmarshalText([]byte(tt.text)), "Expected unmarshaling %q to succeed.", tt.text)
+			}
+			assert.Equal(t, tt.expect, lvl.Level(), "Unexpected level after unmarshaling.")
+			lvl.SetLevel(InfoLevel)
+		}
+	}
 }
